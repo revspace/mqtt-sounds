@@ -5,7 +5,7 @@ use warnings;
 use 5.010;
 
 use Time::HiRes qw(sleep time);
-use LWP::Simple qw(get);
+use LWP::Simple ();
 use Net::MQTT::Simple;
 use Getopt::Long qw(GetOptions);
 use List::Util qw(min);
@@ -15,6 +15,21 @@ chdir $RealBin;
 my $mqtt = Net::MQTT::Simple->new("mosquitto.space.revspace.nl");
 my @topics = ("revspace/state", "revspace/button/#", "revspace/bank/#");
 
+my $player = "be:e0:e6:04:46:38";
+my $url_host = "http://squeezebox.space.revspace.nl:9000";
+my $url_prefix = "$url_host/Classic/status_header.html?player=$player";
+my $url_shuffle = "$url_host/Classic/plugins/RandomPlay/mix.html?player=$player&type=track";
+my $url_playlist = "$url_host/status.m3u?player=$player";
+
+
+sub squeeze {
+    my $i = 0;
+    my $args = join "&", map { "p" . $i++ . "=$_" } @_;
+    my $url = "$url_prefix&$args";
+    warn $url;
+    LWP::Simple::get($url);
+}
+
 my %players = (
     mp3 => ["mpv", "--volume=70", "--" ],
     wav => ["mpv", "--volume=70", "--" ],
@@ -23,11 +38,8 @@ my $squeeze_volume = 30;
 
 sub set_squeeze_volume {
     my ($volume) = @_;
-    get "http://squeezebox.space.revspace.nl:9000/Classic/status_header.html?p0=mixer&p1=volume&p2=$volume&player=be%3Ae0%3Ae6%3A04%3A46%3A38";
+    squeeze qw/mixer volume/ => $volume;
 }
-
-my $setpause = 'http://squeezebox.space.revspace.nl:9000/Classic/status_header.html?p0=pause&p1=1&player=be%3Ae0%3Ae6%3A04%3A46%3A38';
-my $setplay = 'http://squeezebox.space.revspace.nl:9000/Classic/status_header.html?p0=pause&p1=0&player=be%3Ae0%3Ae6%3A04%3A46%3A38';
 
 sub play_sounds {
     my ($path) = @_;
@@ -56,9 +68,9 @@ sub play_sounds {
     print "Playing $file using $player->[0]...\n";
 
     my $old_squeeze_volume = `perl squeeze-volume.pl`;
-    set_squeeze_volume $squeeze_volume if $old_squeeze_volume > $squeeze_volume;
+    squeeze qw/mixer volume/ => $squeeze_volume if $old_squeeze_volume > $squeeze_volume;
     system @$player, $file;
-    set_squeeze_volume $old_squeeze_volume if $old_squeeze_volume > $squeeze_volume;
+    squeeze qw/mixer volume/ => $old_squeeze_volume if $old_squeeze_volume > $squeeze_volume;
 }
 
 sub handle_mqtt {
@@ -75,4 +87,18 @@ sub handle_mqtt {
     sleep 1;
 }
 
-$mqtt->run(map { $_ => \&handle_mqtt } @topics);
+$mqtt->run(
+    "revspace/button/skip" => sub {
+        my @playlist = LWP::Simple::get($url_playlist) =~ /(#EXTURL:.*)/g;
+
+        my %unique;
+        $unique{$_}++ for @playlist;
+
+        if (keys(%unique) == 1) {
+            LWP::Simple::get($url_shuffle);
+        } else {
+            squeeze qw/playlist jump/ => 1;
+        }
+    },
+    map { $_ => \&handle_mqtt } @topics,
+);
